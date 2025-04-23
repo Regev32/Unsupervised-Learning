@@ -1,130 +1,140 @@
-import os
-import pandas as pd
+import warnings
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+import umap
+import glob, os
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import pairwise_distances
+from sklearn.decomposition import PCA, KernelPCA
+from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans, SpectralClustering
+from sklearn.mixture import GaussianMixture
 
-# your existing DR wrappers
-from methods.dimention_reduction.PCA import pca
-from methods.dimention_reduction.ICA import ica_embed
-from methods.dimention_reduction.KPCA import kpca_embed
-from methods.dimention_reduction.UMAP import umap_embed
-
-# your existing clustering wrappers
-from methods.clustering.KMEANS import kmeans_cluster
-from methods.clustering.SPECTRAL import spectral_cluster
-from methods.clustering.HIERARCHICAL import hierarchical_cluster
-from methods.clustering.GMM import gmm_cluster
-from methods.clustering.DBSCAN import dbscan_cluster
-
-# your existing evaluation wrappers
-from methods.cluster_evaluation.SILHOUETTE import silhouette_eval
-from methods.cluster_evaluation.CALINSKI_HARABASZ import calinski_harabasz_eval
-from methods.cluster_evaluation.ADJUSTED_MUTUAL_INFORMATION import adjusted_mutual_info_eval
-from methods.cluster_evaluation.MUTUAL_INFORMATION import mutual_info_eval
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+np.seterr(divide='ignore', invalid='ignore', over='ignore')
 
 
-def run_single_dataset(data_path: str, results_dir: str, label: str):
-    os.makedirs(results_dir, exist_ok=True)
-    df = pd.read_csv(data_path)
-    y  = df['stroke']
-    X  = df.drop(['stroke', 'id'], axis=1)
-    X_std = StandardScaler().fit_transform(X)
+def evaluate_stroke_clusters(cluster_labels: pd.Series,
+                             stroke_series: pd.Series):
+    """
+    Evaluate clusters by the percentage of stroke cases (1's) in each cluster.
 
-    red_methods = {
-        'PCA': pca,
-        'ICA': ica_embed,
-        'KPCA': kpca_embed,
-        'UMAP': umap_embed
-    }
-    cl_methods = {
-        'KMeans':       kmeans_cluster,
-        'Spectral':     spectral_cluster,
-        'Hierarchical': hierarchical_cluster,
-        'GMM':          gmm_cluster,
-        'DBSCAN':       dbscan_cluster
-    }
-    metrics = {
-        'Silhouette':       silhouette_eval,
-        'CalinskiHarabasz': calinski_harabasz_eval,
-        'AMI':              adjusted_mutual_info_eval,
-        'MI':               mutual_info_eval
-    }
+    Returns the highest percentage and the cluster ID achieving it,
+    plus a DataFrame of metrics per cluster.
+    """
+    # align and drop missing
+    df = pd.DataFrame({
+        'cluster': cluster_labels,
+        'stroke': stroke_series
+    }).dropna()
 
-    records = []
+    rows = []
+    for cid, grp in df.groupby('cluster'):
+        size = len(grp)
+        positives = int(grp['stroke'].sum())
+        pct = positives / size if size > 0 else 0.0
 
-    for rname, rfn in red_methods.items():
-        for cname, cfn in cl_methods.items():
-            # one heatmap per metric
-            heatmaps = {
-                m: pd.DataFrame(index=range(1,11), columns=range(2,11), dtype=float)
-                for m in metrics
-            }
+        rows.append({
+            'cluster': cid,
+            'size': size,
+            'positives': positives,
+            'pct': pct
+        })
 
-            for d in range(1, 11):
-                # do DR once per (rname, d)
-                E = rfn(pd.DataFrame(X_std), n_dim=d)
-                # remove any NaN/inf
-                E = np.nan_to_num(E, nan=0.0, posinf=0.0, neginf=0.0)
+    metrics = pd.DataFrame(rows).set_index('cluster')
+    best_cluster = metrics['pct'].idxmax()
+    best_pct = metrics.loc[best_cluster, 'pct']
+    return best_pct, best_cluster, metrics
 
-                # precompute pairwise-distances once
-                D = pairwise_distances(E, metric='euclidean')
 
+def analyze_stroke_datasets(input_dir='../data/filled', output_file='../results/clustering_results.csv'):
+    """Iterate over all CSVs, reduce, cluster, and evaluate by max-%-of-1s."""
+    results = []
+    csv_files = glob.glob(os.path.join(input_dir, '*.csv'))
+
+    for file_path in csv_files:
+        dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+        df = pd.read_csv(file_path)
+
+        X = df.drop(columns=['id', 'stroke'], errors='ignore')
+        y = pd.Series(df['stroke'])
+
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        reductions = {
+            'PCA': lambda n: PCA(n_components=n, random_state=42),
+            'KPCA': lambda n: KernelPCA(n_components=n, kernel='rbf', random_state=42),
+            'UMAP': lambda n: umap.UMAP(n_components=n, random_state=42)
+        }
+
+        for method, reducer_func in reductions.items():
+            for n_components in range(2, 11):
+                reducer = reducer_func(n_components)
+                X_red = reducer.fit_transform(X_scaled)
+
+                clustering_configs = []
+                # DBSCAN
+                for eps in np.arange(0.1, 1.1, 0.1):
+                    clustering_configs.append(('DBSCAN', {'eps': eps, 'min_samples': 5}))
+                # GMM, Agglomerative, KMeans, Spectral
                 for k in range(2, 11):
-                    labels = cfn(pd.DataFrame(E), n_clusters=k)
+                    clustering_configs += [
+                        ('GMM', {'n_components': k, 'covariance_type': 'full', 'random_state': 42}),
+                        ('Agglomerative', {'n_clusters': k, 'linkage': 'ward'}),
+                        ('KMeans', {'n_clusters': k, 'n_init': 10, 'random_state': 42}),
+                        ('Spectral', {'n_clusters': k, 'affinity': 'nearest_neighbors', 'random_state': 42})
+                    ]
 
-                    for mname, mfn in metrics.items():
-                        if mname == 'Silhouette':
-                            score = mfn(D, labels)
-                        elif mname == 'CalinskiHarabasz':
-                            score = mfn(E, labels)
-                        else:
-                            score = mfn(y, labels)
+                for method_name, params in clustering_configs:
+                    # instantiate
+                    if method_name == 'DBSCAN':
+                        model = DBSCAN(**params)
+                    elif method_name == 'GMM':
+                        model = GaussianMixture(**params)
+                    elif method_name == 'Agglomerative':
+                        model = AgglomerativeClustering(**params)
+                    elif method_name == 'KMeans':
+                        model = KMeans(**params)
+                    elif method_name == 'Spectral':
+                        model = SpectralClustering(**params)
+                    else:
+                        continue
 
-                        heatmaps[mname].at[d, k] = score
-                        records.append({
-                            'dataset':    label,
-                            'reduction':  rname,
-                            'clustering': cname,
-                            'n_dim':      d,
-                            'n_clusters': k,
-                            'metric':     mname,
-                            'score':      score
-                        })
+                    # fit & predict
+                    if method_name == 'GMM':
+                        model.fit(X_red)
+                        cluster_labels = model.predict(X_red)
+                    else:
+                        cluster_labels = model.fit_predict(X_red)
 
-            # save out each heatmap
-            for mname, hm in heatmaps.items():
-                plt.figure(figsize=(6,5))
-                plt.title(f"{label} — {rname} + {cname} — {mname}")
-                im = plt.imshow(hm.values, aspect='auto')
-                plt.colorbar(im)
-                plt.xticks(range(len(hm.columns)), hm.columns)
-                plt.yticks(range(len(hm.index)),   hm.index)
-                for i, di in enumerate(hm.index):
-                    for j, kj in enumerate(hm.columns):
-                        plt.text(j, i, f"{hm.at[di,kj]:.2f}",
-                                 ha='center', va='center', fontsize=8)
-                plt.xlabel("n_clusters")
-                plt.ylabel("n_dim")
-                fname = f"{label}_{rname}_{cname}_{mname}.png"
-                plt.savefig(os.path.join(results_dir, fname),
-                            bbox_inches='tight')
-                plt.close()
+                    # evaluate by % of 1's
+                    best_pct, best_cluster, metrics_df = evaluate_stroke_clusters(
+                        pd.Series(cluster_labels), y
+                    )
 
-    # write master CSV
-    result_csv = os.path.join(results_dir,
-                              f"{label}_cluster_eval_results.csv")
-    pd.DataFrame(records).to_csv(result_csv, index=False)
+                    # record result
+                    result = {
+                        'dataset': dataset_name,
+                        'reduction': method,
+                        'n_components': n_components,
+                        'cluster_method': method_name,
+                        'params': ", ".join(f"{k}={v}" for k, v in params.items()),
+                        'best_pct': best_pct,
+                        'best_cluster': best_cluster
+                    }
+                    # also log the size and positives of that best cluster
+                    best_stats = metrics_df.loc[best_cluster]
+                    result['size'] = best_stats['size']
+                    result['positives'] = best_stats['positives']
+
+                    results.append(result)
+
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(output_file, index=False)
+    print(f"Results saved to {output_file}")
+    return results_df
 
 
-if __name__ == '__main__':
-    datasets = {
-        'stroke_mean':       '../data/filled/stroke_mean.csv',
-        'stroke_median':     '../data/filled/stroke_median.csv',
-        'stroke_imputation': '../data/filled/stroke_imputation.csv'
-    }
-    for label, path in datasets.items():
-        out_dir = os.path.join('..', 'results', label)
-        run_single_dataset(path, out_dir, label)
+if __name__ == "__main__":
+    analyze_stroke_datasets()

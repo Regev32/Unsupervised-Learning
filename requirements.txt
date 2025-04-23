@@ -3,3 +3,6 @@ matplotlib
 scikit-learn
 umap-learn
 numpy
+seaborn
+kneed
+hdbscan
