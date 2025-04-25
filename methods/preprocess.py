@@ -25,62 +25,59 @@ data[num_cols] = bmi_imputer.fit_transform(data[num_cols])
 
 # ---------- handle 'unknown' smoking_status for minors ----------
 is_unknown = data['smoking_status'].str.lower() == 'unknown'
-is_minor = data['age'] <= 18
+is_minor   = data['age'] <= 18
 data.loc[is_unknown & is_minor, 'smoking_status'] = 'never smoked'
 
-# ---------- impute remaining smoking_status via 5-NN majority vote ----------
-features = ['age', 'avg_glucose_level', 'bmi']
-mask_unknown = data['smoking_status'].str.lower() == 'unknown'
-known = data.loc[~mask_unknown, :]
-unknown = data.loc[mask_unknown, :]
-nbrs = NearestNeighbors(n_neighbors=5)
-nbrs.fit(known[features])
-distances, all_indices = nbrs.kneighbors(unknown[features],
-                                         n_neighbors=len(known))
+# ---------- dynamic-impute smoking_status via expanding K-NN majority vote ----------
+feat_cols = ['age', 'avg_glucose_level', 'bmi']
+# split known vs unknown
+mask_unk = data['smoking_status'].str.lower() == 'unknown'
+known    = data.loc[~mask_unk].reset_index(drop=False)
+unknown  = data.loc[ mask_unk].reset_index(drop=False)
 
-for unk_idx, neighbor_list in zip(unknown.index, all_indices):
+nbrs = NearestNeighbors()
+nbrs.fit(known[feat_cols])
+# get neighbor positions for unknown samples
+_, all_nbrs = nbrs.kneighbors(unknown[feat_cols], n_neighbors=known.shape[0])
+
+# iterate unknown rows and fill smoking_status
+for unk_row, nbr_positions in zip(unknown.itertuples(), all_nbrs):
     k = 10
-    fill = None
-    # keep growing the neighborhood until there’s a clear mode
+    fill = 'never smoked'
     while True:
-        # take the top-k neighbors
-        neigh = neighbor_list[:k]
-        # count smoking_status among them
-        counts = data.loc[neigh, 'smoking_status'].value_counts()
+        # map positions to original data index
+        topk_pos = nbr_positions[:k]
+        topk_idx = known.loc[topk_pos, 'index']  # original indices
+        # count values among those neighbors
+        counts = data.loc[topk_idx, 'smoking_status'].value_counts()
         if counts.empty:
-            fill = 'never smoked'
             break
-        top_count = counts.iloc[0]
-        # if exactly one status has that top count, we have a winner
-        if (counts == top_count).sum() == 1:
+        max_count = counts.iloc[0]
+        # check if unique majority
+        if (counts == max_count).sum() == 1:
             fill = counts.index[0]
             break
-        # otherwise bump k up
         k += 1
-        # if we’ve exhausted all neighbors, just pick the first mode
-        if k >= len(neighbor_list):
+        if k > len(nbr_positions):
             fill = counts.index[0]
             break
-    data.at[unk_idx, 'smoking_status'] = fill
+    # assign to original data
+    data.at[unk_row.index, 'smoking_status'] = fill
 
 # ---------- normalize numeric columns ----------
-# create new columns with zero mean and unit variance
 scale_cols = ['age', 'avg_glucose_level', 'bmi']
-scaler = StandardScaler()
-scaled_values = scaler.fit_transform(data[scale_cols])
-for col, vals in zip(scale_cols, scaled_values.T):
+scaler     = StandardScaler()
+scaled_vals= scaler.fit_transform(data[scale_cols])
+for col, vals in zip(scale_cols, scaled_vals.T):
     data[f'normalized_{col}'] = vals
-# drop originals
-data.drop(scale_cols, axis=1, inplace=True)
 
 # ---------- encoding ----------
-# binary flags
-data['is_ever_married'] = (data['ever_married'] == 'Yes').astype(int)
-data['is_male'] = (data['gender'] == 'Male').astype(int)
-data['is_Residence_type_Urban'] = (data['Residence_type'] == 'Urban').astype(int)
-# drop originals
+data['is_ever_married']           = (data['ever_married']   == 'Yes').astype(int)
+data['is_male']                   = (data['gender']         == 'Male').astype(int)
+data['is_Residence_type_Urban']   = (data['Residence_type'] == 'Urban').astype(int)
+# drop original categorical columns
 data.drop(['ever_married', 'gender', 'Residence_type'], axis=1, inplace=True)
-# one-hot for work_type & smoking_status
+# one-hot encode work_type & smoking_status
 data = pd.get_dummies(
     data,
     columns=['work_type', 'smoking_status'],
@@ -95,4 +92,4 @@ data['stroke'] = data.pop('stroke')
 os.makedirs('../data', exist_ok=True)
 data.to_csv('../data/stroke.csv', index=False)
 
-print("Finished preprocessing (including normalized columns)")
+print("Finished preprocessing with dynamic smoking imputation")

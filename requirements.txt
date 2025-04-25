@@ -1,3 +1,6 @@
+tqdm
+scikit_posthocs
+scipy
 pandas
 matplotlib
 scikit-learn

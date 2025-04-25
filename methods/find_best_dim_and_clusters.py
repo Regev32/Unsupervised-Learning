@@ -8,6 +8,7 @@ from sklearn.decomposition import PCA, KernelPCA
 from sklearn.cluster import DBSCAN, AgglomerativeClustering, KMeans, SpectralClustering
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score, mutual_info_score
+from tqdm import tqdm
 
 # ---------- suppress warnings ----------
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -19,8 +20,8 @@ np.seterr(divide='ignore', invalid='ignore', over='ignore')
 def bootstrap_cluster_evaluation(
     file_path="../data/stroke.csv",
     n_bootstrap=50,
-    silhouette_output="silhouette_scores.csv",
-    mi_output="mi_scores.csv",
+    silhouette_output="../results/silhouette_scores.csv",
+    mi_output="../results/mi_scores.csv",
     random_seed=42
 ):
     """
@@ -30,6 +31,7 @@ def bootstrap_cluster_evaluation(
     Saves two CSVs of shape (n_bootstrap x n_methods):
       - silhouette scores
       - mutual information scores
+    Prints progress for each replicate.
     """
     # load full dataset
     df_full = pd.read_csv(file_path)
@@ -42,13 +44,11 @@ def bootstrap_cluster_evaluation(
         'UMAP': lambda n: umap.UMAP(n_components=n, random_state=random_seed)
     }
 
-    # clustering configurations
+    # clustering configurations\
     def get_clustering_configs():
         configs = []
-        # DBSCAN
         for eps in np.arange(0.1, 1.1, 0.1):
             configs.append(('DBSCAN', {'eps': eps, 'min_samples': 5}))
-        # GMM, Agglomerative, KMeans, Spectral
         for k in range(2, 11):
             configs += [
                 ('GMM', {'n_components': k, 'covariance_type': 'full', 'random_state': random_seed}),
@@ -62,7 +62,12 @@ def bootstrap_cluster_evaluation(
     mi_rows = []
     rng = np.random.RandomState(random_seed)
 
-    for b in range(n_bootstrap):
+    # iterate with progress indicator
+    for b in tqdm(range(n_bootstrap), desc="Bootstraps"):
+        # progress print if tqdm unavailable
+        if tqdm == range:
+            print(f"Running replicate {b+1}/{n_bootstrap}")
+
         # full-size bootstrap sample
         df = df_full.sample(n=N, replace=True, random_state=rng.randint(0, 2**32 - 1))
         X = df.drop(columns=['id', 'stroke'], errors='ignore')
